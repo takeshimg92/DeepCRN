@@ -11,8 +11,12 @@ import tempfile
 # from IPython.display import set_matplotlib_formats
 from tensorflow.python.ops import math_ops
 from tensorflow.keras import layers
+from tensorflow_model_optimization.sparsity.keras import prune_low_magnitude
+# prune_low_magnitude = tfmot.sparsity.keras.prune_low_magnitude
 import time
 from tqdm import tqdm
+
+from settings import *
 
 # %matplotlib inline
 assert tf.test.gpu_device_name() == '/device:GPU:0', "Not connected to GPU"
@@ -301,13 +305,30 @@ def count_trainable_weights(model):
 def load_model(name, job):
     return tf.keras.models.load_model(os.path.join(job_folder(name, job), 'model'))
 
-def save_baseline_model(model, X_test, y_test, name, job, history, grid_params, training_params):
+def flat_list_trainable_weights(model):
+
+    weight_list = model.trainable_weights
+
+    w_l = []
+    for weight_array in weight_list:
+        w_l.extend(
+            list(weight_array.numpy().flatten())
+        )
+    
+    return np.array(w_l)
+
+def count_significative_weights(model, thresh=1e-4):
+
+    weight_list = flat_list_trainable_weights(model)
+    return len([x for x in weight_list if np.abs(x) >= thresh])
+
+def save_baseline_model(model, X_test, y_test, job_folder_path, grid_params, training_params):
     # save model
-    model.save(os.path.join(job_folder(name, job), 'model'))
+    model.save(os.path.join(job_folder_path, 'model'))
 
     # save model params
     params = {'grid_params': grid_params, 'training_params': training_params}
-    with open(os.path.join(job_folder(name, job), 'parameters.pickle'), 'wb') as f:
+    with open(os.path.join(job_folder_path, 'parameters.pickle'), 'wb') as f:
         pickle.dump(params, f)
 
     # save model performance and weights
@@ -318,17 +339,23 @@ def save_baseline_model(model, X_test, y_test, name, job, history, grid_params, 
             'test_set_accuracy':  test_set_accuracy
         }
 
-    weights_dict = {'trainable_weights': float(count_trainable_weights(model))}
+    weights_dict = {
+        'trainable_weights': float(count_trainable_weights(model)),
+        'significative_weights': float(count_significative_weights(model))
+    }
 
-    print(f"Job {job}: test set acc {round(test_set_accuracy,3)}; {weights_dict['trainable_weights']} weights")
+    print(f"  > Test set acc {round(test_set_accuracy,3)}")
+    print(f"  > {weights_dict['trainable_weights']} trainable weights")
+    print(f"  > {weights_dict['significative_weights']} significative weights")
 
-    with open(os.path.join(job_folder(name, job), 'performance.json'), 'w') as f:
+    with open(os.path.join(job_folder_path, 'performance.json'), 'w') as f:
         json.dump(perf_dict, f)
     
-    with open(os.path.join(job_folder(name, job), 'weights_info.json'), 'w') as f:
+    with open(os.path.join(job_folder_path, 'weights_info.json'), 'w') as f:
         json.dump(weights_dict, f)
 
     return True
+
 
 def build_training_grid(**names_list_params):
     """
@@ -355,116 +382,109 @@ def build_training_grid(**names_list_params):
         
     return grid_dict
 
-# _ = build_training_grid(a=[1,2,3], b=[3,4,5], c=['u', 'k', 'p'], d=list(range(50)))
-# build_training_grid(a=[1,2,3], b=[3,4,5], c=['u'])
-
-### Main
-
-# This defines our data
-X_train_raw, X_test_raw, y_train_raw, y_test_raw = read_mnist_data()
-# visualize how resizing works
-# _ = resize_images(X_train_raw, pixel_size=10, plot=True)
-
-# SETTINGS:
-# 1. Hyperparameter grid 
-resize_sizes = [5, 7, 10, 15]
-base_architectures = [
-        [2**2]*1,
-        [6]*1,    
-        [2**3]*1,
-        [2**3]*2,
-        [2**3]*3,
-        [2**3]*4,
-        [2**4]*1,
-        [2**4]*2,
-        [2**4]*3,
-        [2**4]*4,
-        [2**5]*1,
-        [2**6]*1,
-        [2**7]*1,
-        [2**3, 2**4],
-        [2**3, 2**5],
-        [2**3, 2**6],
-        [2**3, 2**7],
-        [2**4, 2**5],
-        [2**4, 2**6],
-        [2**4, 2**7],
-        [2**5, 2**6],
-        [2**5, 2**7],
-        [2**6, 2**7],
-        [2**7, 2**7]
-]
-reg_params = [0, 10**-3, 10**-2]
-dropout_params = [0.1]
-
-# combine all these
-grid_jobs = build_training_grid(input_side_pixel=resize_sizes, 
-                                layer_weights=base_architectures, 
-                                l2reg=reg_params,
-                                dropout_list=dropout_params)
-
-# 2. Training parameters (no grid)
-training_params = \
-    {'verbose': False,
-     'epochs':  40,
-     'validation_split': 0.1,
-     'batch_size': 128
-    }
-
-tracker = JobTracker(name=TRAIN_BASELINE_MODELS_JOB_ID)
-if START_FROM_SCRATCH:
-    tracker.reset()
-    tracker = JobTracker(name=TRAIN_BASELINE_MODELS_JOB_ID)
-
 def expected_time_left(time_elapsed, current_iter, total_iters, units='mins'):
     # Find time per iteraction 
     assert current_iter > 0, 'Current iter must start from 1 and never be zero'
     avg_time = time_elapsed/current_iter
-    
+
     # expected time left
     expec = avg_time * (total_iters - current_iter)
-    
+
     print(f"({current_iter}/{total_iters}) Elapsed: {round(time_elapsed)},   Expected time left: {round(expec)} {units}")
 
-# %%time
-# PART 1: train all baseline models
-# Load tracker - it will see, for this run, how many jobs have been done and so on
-# delete files and folders associated with unfinished jobs
-# then set all jobs who are incomplete to not started
-tracker.create_jobs(grid_jobs.keys())  # this will only create jobs if they haven't been defined yet
-tracker.reset_unfinished_jobs()
 
-# Pick subset of jobs that need to be done
-subgrid_todo_dict = {todo_job: grid_jobs[todo_job] for todo_job in tracker.read_to_do_jobs()}
-jobs_todo = len(subgrid_todo_dict)
 
-t0 = time.time()
-if jobs_todo == 0:
-    print("All jobs trained")
-    pass
-else:
-    print(f"There are {jobs_todo} jobs left to run")
-    for i, (job_id, grid_params) in enumerate(subgrid_todo_dict.items()):
-        # try:
-        tracker.mark_as_started(job_id)
-        X_train, X_test, y_train, y_test = preprocess_mnist_full(X_train_raw, X_test_raw, y_train_raw, y_test_raw, 
-                                                                    pixel_new_width=grid_params['input_side_pixel'])
-        model = build_mnist_model(**grid_params)
-        history = model.fit(X_train, y_train,
-                    callbacks=[
-                                tf.keras.callbacks.EarlyStopping(
-                                    monitor='val_loss', 
-                                    mode='min',
-                                    verbose=0, patience=20,
-                                    restore_best_weights=True)],
-                    **training_params)
-        
-        save_baseline_model(model, X_test, y_test, TRAIN_BASELINE_MODELS_JOB_ID, job_id, history, grid_params, training_params)
-        tracker.mark_as_completed(job_id)
-        expected_time_left((time.time()-t0)/60.0, i+1, jobs_todo, units='mins')
-        # except Exception as e:
-        #     print(f"Could not train {grid_params}")
-        #     print(e)
+if __name__ == '__main__':
 
-## Pruning
-# to be done
+    X_train_raw, X_test_raw, y_train_raw, y_test_raw = read_mnist_data()
+
+    grid_jobs = build_training_grid(input_side_pixel=resize_sizes, 
+                                    layer_weights=base_architectures, 
+                                    l2reg=reg_params,
+                                    dropout_list=dropout_params)
+
+
+
+
+    tracker = JobTracker(name=TRAIN_BASELINE_MODELS_JOB_ID)
+    if START_FROM_SCRATCH:
+        tracker.reset()
+        tracker = JobTracker(name=TRAIN_BASELINE_MODELS_JOB_ID)
+
+    # Load tracker - it will see, for this run, how many jobs have been done and so on
+    # delete files and folders associated with unfinished jobs
+    # then set all jobs who are incomplete to not started
+    tracker.create_jobs(grid_jobs.keys())  # this will only create jobs if they haven't been defined yet
+    tracker.reset_unfinished_jobs()
+
+    # Pick subset of jobs that need to be done
+    subgrid_todo_dict = {todo_job: grid_jobs[todo_job] for todo_job in tracker.read_to_do_jobs()}
+    jobs_todo = len(subgrid_todo_dict)
+
+    if jobs_todo == 0:
+        print("All jobs trained")
+        pass
+    else:
+        print(f"There are {jobs_todo} jobs left to run")
+        for job_id, grid_params in tqdm(subgrid_todo_dict.items()):
+            # try:
+            print(f"Job: {job_id} -----------------------------------------------------------")
+            tracker.mark_as_started(job_id)
+            X_train, X_test, y_train, y_test = preprocess_mnist_full(X_train_raw, X_test_raw, y_train_raw, y_test_raw, 
+                                                                        pixel_new_width=grid_params['input_side_pixel'])
+            model = build_mnist_model(**grid_params)
+            history = model.fit(X_train, y_train,
+                        callbacks=[
+                                    tf.keras.callbacks.EarlyStopping(
+                                        monitor='val_loss', 
+                                        mode='min',
+                                        verbose=0, patience=20,
+                                        restore_best_weights=True)],
+                        **training_params)
+            save_baseline_model(model, X_test, y_test, job_folder(TRAIN_BASELINE_MODELS_JOB_ID, job_id), grid_params, training_params)
+            base_weights_path = os.path.join(JOB_RUNS_FOLDER, TRAIN_BASELINE_MODELS_JOB_ID, job_id, 'weights')
+            model.save_weights(base_weights_path)
+
+            # prune
+            print("- Pruning...")
+            for prune_thresh in pruning_grid:
+
+                print(f"> Prune = {prune_thresh}")
+                model_for_pruning = build_mnist_model(**grid_params)
+                model_for_pruning.load_weights(base_weights_path).expect_partial()
+
+                epochs_prune = pruning_training_params['epochs']
+                batch_size_prune = pruning_training_params['batch_size']
+                val_split_prune = pruning_training_params['validation_split']
+
+                pruning_params = {'pruning_schedule':
+                                tfmot.sparsity.keras.PolynomialDecay(
+                                    initial_sparsity=0,
+                                    final_sparsity=prune_thresh,
+                                    begin_step=0,
+                                    end_step=np.ceil(len(X_train) / batch_size_prune).astype(np.int32) * epochs_prune)
+                                }
+                model_for_pruning = prune_low_magnitude(model_for_pruning, **pruning_params)
+
+                # `prune_low_magnitude` requires a recompile.
+                model_for_pruning.compile(optimizer='adam',
+                            loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                            metrics=['accuracy'])
+
+                model_for_pruning.fit(X_train, y_train,
+                                    verbose=False,
+                                    batch_size=batch_size_prune, epochs=epochs_prune, validation_split=val_split_prune,
+                                    callbacks= [
+                                        tfmot.sparsity.keras.UpdatePruningStep(),
+                                        # tfmot.sparsity.keras.PruningSummaries(log_dir=logdir),
+                                    ])
+
+                # Save pruned model
+                save_baseline_model(model_for_pruning, X_test, y_test, 
+                                    os.path.join(job_folder(TRAIN_BASELINE_MODELS_JOB_ID, job_id), f"pruned_{prune_thresh}"), 
+                                    grid_params, training_params)
+
+            tracker.mark_as_completed(job_id)
+            # except Exception as e:
+            #     print(f"Could not train {grid_params}")
+            #     print(e)
