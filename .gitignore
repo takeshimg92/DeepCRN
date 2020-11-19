@@ -1,0 +1,13 @@
+# Simulation runs
+*/simulations/*
+simulations/
+
+# Data;
+# Only lave data/publish
+data/raw
+data/processed
+
+# Bite compiled
+__pycache__/
+*.py[cod]
+*.py.class
