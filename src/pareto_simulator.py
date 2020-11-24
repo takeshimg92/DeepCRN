@@ -79,8 +79,7 @@ if __name__ == '__main__':
                                            X_train, y_train)
 
                 save_baseline_model(pruned_model, X_test, y_test,
-                                    os.path.join(job_folder(TRAIN_BASELINE_MODELS_JOB_ID, job_id),
-                                                 f"pruned_{prune_thresh}"),
+                                    os.path.join(job_folder(TRAIN_BASELINE_MODELS_JOB_ID, job_id), f"pruned_{prune_thresh}"),
                                     grid_params, training_params)
 
             tracker.mark_as_completed(job_id)
