@@ -35,15 +35,6 @@ if __name__ == '__main__':
     # Pick subset of jobs that need to be done
     subgrid_todo_dict = {todo_job: grid_jobs[todo_job] for todo_job in tracker.read_to_do_jobs()}; jobs_todo = len(subgrid_todo_dict)
 
-
-    def train_worker(data, params):
-        grid_params, train_params = break_params(params)
-        X_train, X_test, y_train, y_test = break_data(data)
-        X_train, X_test, y_train, y_test = preprocess_mnist_full(X_train, X_test, y_train, y_test,
-                                                                 pixel_new_width=grid_params['input_side_pixel'])
-        
-
-
     if jobs_todo == 0:
         print("All jobs trained")
         pass
