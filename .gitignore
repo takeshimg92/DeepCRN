@@ -1,6 +1,9 @@
 # Simulation runs
 */simulations/*
 simulations/
+*/.idea/*
+.idea
+*.csv
 
 # Data;
 # Only lave data/publish

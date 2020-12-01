@@ -43,7 +43,9 @@ def build_mnist_model(input_side_pixel: int, layer_weights: list, l2reg: float, 
 
     # Output: keep a linear dense layer for classification
     # make sure to use from_logits=True in your loss
-    model.add(layers.Dense(10))
+    model.add(layers.Dense(10),
+              bias_constraint=NonPos(),
+              bias_initializer=negativeHe())
 
     model.compile(optimizer='adam',
                   loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
